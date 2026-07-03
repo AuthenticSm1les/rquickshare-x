@@ -14,7 +14,7 @@ use store::get_startminimized;
 #[cfg(target_os = "macos")]
 use tauri::image::Image;
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder},
+    menu::{CheckMenuItem, MenuBuilder, MenuItemBuilder, Submenu},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, Window, WindowEvent,
 };
@@ -79,6 +79,25 @@ async fn main() -> Result<(), anyhow::Error> {
             // Initialize default values for the store
             init_default(app.app_handle());
 
+            // Build visibility submenu for tray
+            let current_vis = get_visibility(app.app_handle());
+            let vis_visible = CheckMenuItem::with_id(
+                app, "vis_visible", "Visible", true,
+                current_vis == Visibility::Visible, None::<&str>,
+            )?;
+            let vis_invisible = CheckMenuItem::with_id(
+                app, "vis_invisible", "Invisible", true,
+                current_vis == Visibility::Invisible, None::<&str>,
+            )?;
+            let vis_temporarily = CheckMenuItem::with_id(
+                app, "vis_temporarily", "Temporarily (1 min)", true,
+                current_vis == Visibility::Temporarily, None::<&str>,
+            )?;
+            let visibility_submenu = std::sync::Arc::new(Submenu::with_items(
+                app, "Visibility", true,
+                &[&vis_visible, &vis_invisible, &vis_temporarily],
+            )?);
+
             // Initialize system Tray
             let name = MenuItemBuilder::new("RQuickShare-X")
                 .enabled(false)
@@ -88,7 +107,10 @@ async fn main() -> Result<(), anyhow::Error> {
             let menu = MenuBuilder::new(app)
                 .item(&name)
                 .separator()
-                .items(&[&show, &quit])
+                .item(&show)
+                .item(visibility_submenu.as_ref())
+                .separator()
+                .item(&quit)
                 .build()?;
 
             #[cfg(target_os = "macos")]
@@ -99,16 +121,36 @@ async fn main() -> Result<(), anyhow::Error> {
             let tray = TrayIconBuilder::new()
                 .icon(icon)
                 .menu(&menu)
-                .on_menu_event(move |app, event| match event.id().as_ref() {
-                    "show" => {
-                        trace!("tray_show");
-                        open_main_window(app);
+                .on_menu_event(move |app, event| {
+                    let sub = visibility_submenu.clone();
+                    match event.id().as_ref() {
+                        "show" => {
+                            trace!("tray_show");
+                            open_main_window(app);
+                        }
+                        "vis_visible" | "vis_invisible" | "vis_temporarily" => {
+                            let new_vis = match event.id().as_ref() {
+                                "vis_visible" => Visibility::Visible,
+                                "vis_invisible" => Visibility::Invisible,
+                                _ => Visibility::Temporarily,
+                            };
+                            trace!("tray_visibility: {:?}", new_vis);
+                            let state: tauri::State<'_, AppState> = app.state();
+                            state.rqs.lock().unwrap().change_visibility(new_vis);
+                            for id in ["vis_visible", "vis_invisible", "vis_temporarily"] {
+                                if let Some(kind) = sub.get(id) {
+                                    if let Some(item) = kind.as_check_menuitem() {
+                                        let _ = item.set_checked(id == event.id().as_ref());
+                                    }
+                                }
+                            }
+                        }
+                        "quit" => {
+                            trace!("tray_quit");
+                            kill_app(app.app_handle());
+                        }
+                        _ => (),
                     }
-                    "quit" => {
-                        trace!("tray_quit");
-                        kill_app(app.app_handle());
-                    }
-                    _ => (),
                 })
                 .build(app)?;
 
